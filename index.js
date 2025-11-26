@@ -1,21 +1,34 @@
 const { Client, GatewayIntentBits } = require('discord.js');
-// Import Express to create the web server for 24/7 hosting
-const express = require('express');
-
-// The DISCORD_TOKEN will be read from Replit's Secret Environment Variables
-const token = process.env.DISCORD_TOKEN; 
-// We still use config.json for settings like prefix and logChannelID
-const { logChannelID, prefix } = require('./config.json'); 
+const fs = require('fs');
+const { token, logChannelID, prefix } = require('./config.json');
 
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent 
+        GatewayIntentBits.MessageContent
     ]
 });
 
-// Predefined list of valid event names
+// --- EP STORAGE ---
+const EP_FILE = './epData.json';
+let epData = {};
+
+// Load EP data
+if (fs.existsSync(EP_FILE)) {
+    try {
+        epData = JSON.parse(fs.readFileSync(EP_FILE, 'utf8'));
+    } catch (err) {
+        console.error('Error reading EP file:', err);
+        epData = {};
+    }
+}
+
+function saveEP() {
+    fs.writeFileSync(EP_FILE, JSON.stringify(epData, null, 2));
+}
+
+// --- LOGGING COMMAND (UNCHANGED) ---
 const EVENTS = [
     "Spar",
     "Small Patrol",
@@ -30,24 +43,7 @@ const EVENTS = [
 
 const REQUIRED_ROLE = 'Event Permission';
 
-// --- Function to Keep the Bot Alive (for Replit) ---
-const app = express();
-const port = 3000; 
-
-function keepAlive() {
-  // Create a simple endpoint that UptimeRobot will ping
-  app.get('/', (req, res) => {
-    res.send('Bot is Running!');
-  });
-
-  app.listen(port, () => {
-    console.log(`Web server listening on port ${port}`);
-  });
-}
-// ----------------------------------------------------
-
-
-client.once('clientReady', () => { 
+client.once('ready', () => {
     console.log(`Logged in as ${client.user.tag}!`);
     client.user.setActivity('Logging events');
 });
@@ -55,89 +51,105 @@ client.once('clientReady', () => {
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
-    const commandName = 'log';
-    const fullCommand = prefix + commandName;
+    // --- LOG COMMAND ---
+    const fullLogCommand = prefix + 'log';
+    if (message.content.toLowerCase().startsWith(fullLogCommand)) {
+        const hasPermission = message.member.roles.cache.some(role => role.name === REQUIRED_ROLE);
+        if (!hasPermission) return message.reply(`❌ You need the **${REQUIRED_ROLE}** role to use this command.`);
 
-    if (!message.content.toLowerCase().startsWith(fullCommand)) return;
+        const rawArgs = message.content.slice(fullLogCommand.length).trim();
+        const args = rawArgs.split(/\s+/);
+        const eventName = args.shift();
 
-    // --- RANK-LOCKING CHECK ---
-    const hasPermission = message.member.roles.cache.some(role => role.name === REQUIRED_ROLE);
-    
-    if (!hasPermission) {
-        return message.reply(`❌ You need the **${REQUIRED_ROLE}** role to use this command.`);
-    }
-
-    // --- 1. Argument Parsing ---
-    
-    const commandLength = fullCommand.length;
-    const rawArgs = message.content.slice(commandLength).trim();
-    
-    const args = rawArgs.split(/\s+/);
-    const eventName = args.shift();
-
-    // 2. Event validation
-    if (!EVENTS.includes(eventName)) {
-        return message.channel.send(`Invalid event: **${eventName}**. Valid events: \`\`\`${EVENTS.join(', ')}\`\`\``);
-    }
-
-    // --- 3. Robust Attendee Parsing (Uses Mentions and Regex) ---
-    const attendees = [];
-    const mentionedMembers = message.mentions.members; 
-
-    if (mentionedMembers.size === 0) {
-        return message.channel.send('Please mention at least one attendee with their EP (e.g., @player 3 EP).');
-    }
-
-    mentionedMembers.forEach(member => {
-        // Regex looks for: [mention] [space] [NUMBER] [space] EP (case-insensitive)
-        const regex = new RegExp(`${member.toString()}\\s*(\\d+)\\s*EP`, 'i');
-        const match = message.content.match(regex);
-
-        if (match) {
-            const epNumber = match[1];
-            // Format for the log: @(player) (Amount of EP)
-            attendees.push(`${member.toString()} ${epNumber} EP`); 
+        if (!EVENTS.includes(eventName)) {
+            return message.channel.send(`Invalid event: **${eventName}**. Valid events: \`${EVENTS.join(', ')}\``);
         }
-    });
 
-    if (attendees.length === 0) {
-        return message.channel.send('Could not find EP values for any mentioned user. The format must be: `@user # EP`');
-    }
+        const attendees = [];
+        const mentionedMembers = message.mentions.members;
 
-    // --- 4. Generate and Send Log Message ---
+        if (mentionedMembers.size === 0) {
+            return message.channel.send('Please mention at least one attendee with their EP (e.g., @player 3 EP).');
+        }
 
-    const today = new Date();
-    const date = `${today.toLocaleString('default', { month: 'short' })} ${today.getDate()}, ${today.getFullYear()}`;
+        mentionedMembers.forEach(member => {
+            const regex = new RegExp(`${member.toString()}\\s*(\\d+)\\s*EP`, 'i');
+            const match = message.content.match(regex);
+            if (match) {
+                const epNumber = parseFloat(match[1]);
+                attendees.push(`${member.toString()} ${epNumber} EP`);
 
-    // Build log message (Single-line attendee list separated by " | ")
-    const logMessage = `**Type:** ${eventName}
+                // --- ADD EP ---
+                if (!epData[member.id]) epData[member.id] = 0;
+                epData[member.id] += epNumber;
+            }
+        });
+
+        saveEP();
+
+        if (attendees.length === 0) {
+            return message.channel.send('Could not find EP values for any mentioned user. The format must be: @user # EP');
+        }
+
+        const today = new Date();
+        const date = `${today.toLocaleString('default', { month: 'short' })} ${today.getDate()}, ${today.getFullYear()}`;
+
+        const logMessage = `**Type:** ${eventName}
 **Host:** ${message.author.toString()} 
 **Date:** ${date}
 
-**Attendees:** ${attendees.join(' | ')}`; 
+**Attendees:** ${attendees.join(' | ')}`;
 
-    // Send to log channel
-    let targetChannel;
-    try {
-        if (logChannelID) {
-            targetChannel = await client.channels.fetch(logChannelID);
-        } else {
-            targetChannel = message.channel;
+        let targetChannel;
+        try {
+            if (logChannelID) targetChannel = await client.channels.fetch(logChannelID);
+            else targetChannel = message.channel;
+
+            if (targetChannel && targetChannel.send) {
+                await targetChannel.send({ content: logMessage });
+                await message.channel.send(`✅ Successfully logged **${eventName}** with **${attendees.length}** attendees to <#${targetChannel.id}>.`);
+            } else {
+                await message.channel.send('❌ Error: The configured log channel ID is invalid or I lack permissions to send messages there.');
+            }
+        } catch (error) {
+            console.error("Error sending log:", error);
+            return message.channel.send('❌ An unexpected error occurred while trying to log the event.');
+        }
+        return; // done processing !log
+    }
+
+    // --- EP COMMAND ---
+    if (message.content.toLowerCase().startsWith(prefix + 'ep')) {
+        const verifiedRole = 'Verified';
+        if (!message.member.roles.cache.some(role => role.name === verifiedRole)) {
+            return message.reply(`❌ You need the **${verifiedRole}** role to use this command.`);
         }
 
-        if (targetChannel && targetChannel.send) {
-            await targetChannel.send({ content: logMessage });
-            
-            await message.channel.send(`✅ Successfully logged **${eventName}** with **${attendees.length}** attendees to <#${targetChannel.id}>.`);
-        } else {
-             await message.channel.send('❌ Error: The configured log channel ID is invalid or I lack permissions to send messages there.');
+        const mentioned = message.mentions.members.first();
+        if (!mentioned) return message.reply('Please mention a player to check EP.');
+
+        const ep = epData[mentioned.id] || 0;
+        return message.reply(`${mentioned.user.username} has ${ep} EP.`);
+    }
+
+    // --- EDIT EP COMMAND ---
+    if (message.content.toLowerCase().startsWith(prefix + 'edit ep')) {
+        const editRole = 'EP Edit Permission';
+        if (!message.member.roles.cache.some(role => role.name === editRole)) {
+            return message.reply(`❌ You need the **${editRole}** role to use this command.`);
         }
-    } catch (error) {
-        console.error("Error fetching or sending to log channel:", error);
-        return message.channel.send('❌ An unexpected error occurred while trying to log the event.');
+
+        const mentioned = message.mentions.members.first();
+        if (!mentioned) return message.reply('Please mention a player to edit EP.');
+
+        const args = message.content.split(/\s+/).slice(3); // after !edit ep @player
+        const newEP = parseFloat(args[0]);
+        if (isNaN(newEP)) return message.reply('Please provide a valid number for EP.');
+
+        epData[mentioned.id] = newEP;
+        saveEP();
+        return message.reply(`✅ Successfully set ${mentioned.user.username}'s EP to ${newEP}.`);
     }
 });
 
-// 5. Start the Keep Alive server and then login the client
-keepAlive(); 
-client.
+client.login(token);
